@@ -1,0 +1,75 @@
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Cairo", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Overwrite Zinc palette with Slate and High Density colors */
+  --color-zinc-950: #0f172a; /* main-bg */
+  --color-zinc-900: #1e293b; /* sidebar & card bg */
+  --color-zinc-850: #293548;
+  --color-zinc-800: #334155; /* border-color */
+  --color-zinc-700: #475569; /* hover-color */
+  --color-zinc-600: #64748b;
+  --color-zinc-500: #94a3b8; /* secondary text */
+  --color-zinc-400: #cbd5e1;
+  --color-zinc-300: #e2e8f0;
+  --color-zinc-200: #f1f5f9;
+  --color-zinc-100: #f8fafc; /* primary text */
+
+  /* Emerald values for high high density green accents */
+  --color-emerald-500: #10b981;
+  --color-emerald-600: #059669;
+  --color-emerald-700: #047857;
+  --color-emerald-850: #064e3b;
+  --color-emerald-900: #064e3b;
+  --color-emerald-950: #022c22;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #0f172a; /* Fallback direct Slate 900 background */
+  color: #f8fafc;
+  line-height: 1.5;
+}
+
+/* Custom scrollbars matching High Density slate palette */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0f172a; /* Slate 900 */
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155; /* Slate 700 */
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569; /* Slate 600 */
+}
+
+/* Make badges and buttons slightly smaller, sharper and tighter matching High Density */
+button, input, select, textarea {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Highlight style for active navigation states */
+.active-density-indicator {
+  position: relative;
+}
+
+.active-density-indicator::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 4px;
+  height: 100%;
+  background-color: #10b981;
+  border-radius: 4px 0 0 4px;
+}

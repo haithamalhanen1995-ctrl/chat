@@ -1,6 +1,0 @@
-{
-  "name": "Chat Platform",
-  "description": "منصة دردشة فورية متكاملة بنظام صلاحيات ثنائي (مالك ومستخدمين)، مع دعم رفع الصور، ورابط دعوة فريد، ومحادثات خاصة مع الإدارة.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

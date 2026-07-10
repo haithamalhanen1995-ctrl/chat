@@ -93,6 +93,22 @@ const uploadBytesWithTimeout = (storageRef: any, file: File, timeoutMs: number =
   ]);
 };
 
+// Helper to safely get epoch milliseconds for a Firestore Timestamp, Date, or string
+const getMessageTime = (createdAt: any): number => {
+  if (!createdAt) return 0;
+  if (typeof createdAt.toDate === 'function') {
+    return createdAt.toDate().getTime();
+  }
+  if (createdAt.seconds) {
+    return createdAt.seconds * 1000;
+  }
+  if (createdAt instanceof Date) {
+    return createdAt.getTime();
+  }
+  const parsed = new Date(createdAt).getTime();
+  return isNaN(parsed) ? 0 : parsed;
+};
+
 interface ChatViewProps {
   currentUser: { id: string; role: 'admin' | 'user'; fullName: string; username: string };
   initialInviteCode?: string | null;
@@ -102,6 +118,7 @@ interface ChatViewProps {
   language: LanguageCode;
   setLanguage: (lang: LanguageCode) => void;
   isFirebaseReady: boolean;
+  onUserUpdate?: (user: { id: string; role: 'admin' | 'user'; fullName: string; username: string }) => void;
 }
 
 export const ChatView: React.FC<ChatViewProps> = ({
@@ -112,7 +129,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
   initialSelectedContact = null,
   language,
   setLanguage,
-  isFirebaseReady
+  isFirebaseReady,
+  onUserUpdate
 }) => {
   // Main structural states
   const [activeMode, setActiveMode] = useState<'groups' | 'dms' | 'contacts'>(initialSelectedContact ? 'dms' : 'groups');
@@ -121,6 +139,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const t = (key: string) => {
     return TRANSLATIONS[language]?.[key] || TRANSLATIONS['AR']?.[key] || key;
   };
+  const currentLang = LANGUAGES.find((l) => l.code === language) || LANGUAGES[0];
   const [groups, setGroups] = useState<ChatGroup[]>([]);
   const [selectedGroup, setSelectedGroup] = useState<ChatGroup | null>(initialSelectedGroup);
   const [messages, setMessages] = useState<GroupMessage[]>([]);
@@ -217,8 +236,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       // Sort client-side by createdAt descending
       fetchedNotifs.sort((a, b) => {
-        const t1 = a.createdAt?.seconds || 0;
-        const t2 = b.createdAt?.seconds || 0;
+        const t1 = getMessageTime(a.createdAt);
+        const t2 = getMessageTime(b.createdAt);
         return t2 - t1;
       });
 
@@ -291,6 +310,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Edit Profile modal state
   const [showProfileModal, setShowProfileModal] = useState<boolean>(false);
   const [profileFullName, setProfileFullName] = useState<string>(currentUser.fullName);
+  const [profileUsername, setProfileUsername] = useState<string>(currentUser.username);
   const [profileCountry, setProfileCountry] = useState<string>('IQ');
   const [profileImageFile, setProfileImageFile] = useState<File | null>(null);
   const [profileImagePreview, setProfileImagePreview] = useState<string>('');
@@ -469,17 +489,30 @@ export const ChatView: React.FC<ChatViewProps> = ({
         const profile = docSnap.data() as ChatUser;
         setCurrentUserProfile(profile);
         setProfileFullName(profile.fullName);
+        if (profile.username) {
+          setProfileUsername(profile.username);
+        }
         if (profile.country) {
           setProfileCountry(profile.country);
         }
         if (profile.photoUrl) {
           setProfileImagePreview(profile.photoUrl);
         }
+
+        // Keep parent session state synchronized in real-time
+        if (onUserUpdate && (profile.fullName !== currentUser.fullName || profile.username !== currentUser.username)) {
+          onUserUpdate({
+            id: currentUser.id,
+            role: currentUser.role,
+            fullName: profile.fullName || currentUser.fullName,
+            username: profile.username || currentUser.username
+          });
+        }
       }
     });
 
     return () => unsubProfile();
-  }, [currentUser.id, isFirebaseReady]);
+  }, [currentUser.id, isFirebaseReady, currentUser.fullName, currentUser.username, onUserUpdate]);
 
   // 4. Mark private messages as read when viewing DMs (only for the active conversation)
   useEffect(() => {
@@ -568,12 +601,34 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   const handleUpdateProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!profileFullName.trim()) return;
+    const newFullName = profileFullName.trim();
+    const newUsername = profileUsername.trim().toLowerCase();
+    
+    if (!newFullName || !newUsername) return;
 
     setIsUpdatingProfile(true);
     let finalPhotoUrl = currentUserProfile?.photoUrl || '';
 
     try {
+      // Validate username format if it changed
+      if (newUsername !== (currentUserProfile?.username || currentUser.username)) {
+        const validUsernameRegex = /^[a-zA-Z0-9_]+$/;
+        if (!validUsernameRegex.test(newUsername)) {
+          alert(t('error_username_format'));
+          setIsUpdatingProfile(false);
+          return;
+        }
+
+        // Check if username is already taken
+        const q = query(collection(db, 'users'), where('username', '==', newUsername));
+        const checkSnap = await getDocs(q);
+        if (!checkSnap.empty) {
+          alert(t('error_username_taken'));
+          setIsUpdatingProfile(false);
+          return;
+        }
+      }
+
       if (profileImageFile) {
         try {
           const storageRef = ref(storage, `profiles/${currentUser.id}`);
@@ -589,7 +644,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
       // Update in Firestore
       const userRef = doc(db, 'users', currentUser.id);
       await updateDoc(userRef, {
-        fullName: profileFullName.trim(),
+        fullName: newFullName,
+        username: newUsername,
         photoUrl: finalPhotoUrl,
         country: profileCountry
       });
@@ -598,16 +654,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
       const savedSession = localStorage.getItem('chat_platform_session');
       if (savedSession) {
         const session = JSON.parse(savedSession);
-        session.fullName = profileFullName.trim();
+        session.fullName = newFullName;
+        session.username = newUsername;
         localStorage.setItem('chat_platform_session', JSON.stringify(session));
       }
 
-      alert('تم تحديث الملف الشخصي بنجاح!');
+      // Snappy instant trigger for the parent state
+      if (onUserUpdate) {
+        onUserUpdate({
+          id: currentUser.id,
+          role: currentUser.role,
+          fullName: newFullName,
+          username: newUsername
+        });
+      }
+
+      alert(t('alert_profile_success'));
       setShowProfileModal(false);
       setProfileImageFile(null);
     } catch (err: any) {
       console.error('Error updating profile:', err);
-      alert(`فشل تحديث الملف الشخصي: ${err.message}`);
+      alert(`${t('alert_profile_error')}: ${err.message}`);
     } finally {
       setIsUpdatingProfile(false);
     }
@@ -670,8 +737,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       // Sort messages client-side by time
       fetchedMsgs.sort((a, b) => {
-        const t1 = a.createdAt?.seconds || 0;
-        const t2 = b.createdAt?.seconds || 0;
+        const t1 = getMessageTime(a.createdAt);
+        const t2 = getMessageTime(b.createdAt);
         return t1 - t2;
       });
 
@@ -707,8 +774,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
       // Sort client side
       fetchedDms.sort((a, b) => {
-        const t1 = a.createdAt?.seconds || 0;
-        const t2 = b.createdAt?.seconds || 0;
+        const t1 = getMessageTime(a.createdAt);
+        const t2 = getMessageTime(b.createdAt);
         return t1 - t2;
       });
 
@@ -848,8 +915,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
         id: messageId,
         groupId: selectedGroup.id,
         senderId: currentUser.id,
-        senderName: currentUser.fullName,
-        senderUsername: currentUser.username,
+        senderName: currentUserProfile?.fullName || currentUser.fullName,
+        senderUsername: currentUserProfile?.username || currentUser.username,
         text: inputText.trim(),
         createdAt: new Date()
       };
@@ -919,7 +986,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   // Send reply private DM to admin or selected contact
   const handleSendPrivateMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim()) return;
+    if (!inputText.trim() && !imageFile) return;
 
     // Immediately clear typing state
     if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
@@ -939,10 +1006,30 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
 
     const chatId = `admin_${targetUserId}`;
+    let finalPhotoUrl = '';
 
     try {
+      // 1. Upload file if exists with compressed fallback and timeout
+      if (imageFile) {
+        try {
+          const compressedBase64 = await compressImageToBase64(imageFile);
+          try {
+            const storageRef = ref(storage, `private_messages/${messageId}`);
+            const snapshot = await uploadBytesWithTimeout(storageRef, imageFile, 2500);
+            finalPhotoUrl = await getDownloadURL(snapshot.ref);
+          } catch (storageErr) {
+            console.warn('Firebase Storage failed or timed out, saving photo as compressed Base64:', storageErr);
+            finalPhotoUrl = compressedBase64 || imagePreview; // Save the compressed base64 string directly
+          }
+        } catch (compressErr) {
+          console.error('Error compressing image:', compressErr);
+          finalPhotoUrl = imagePreview;
+        }
+      }
+
+      // 2. Post to Firestore
       const pmRef = doc(db, 'privateMessages', messageId);
-      await setDoc(pmRef, {
+      const pmData: PrivateMessage = {
         id: messageId,
         chatId: chatId,
         senderId: currentUser.id,
@@ -950,14 +1037,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
         text: inputText.trim(),
         createdAt: new Date(),
         read: false
-      });
+      };
+
+      if (finalPhotoUrl) {
+        pmData.photoUrl = finalPhotoUrl;
+      }
+
+      await setDoc(pmRef, pmData);
 
       // Send private message notification
+      const notificationText = inputText.trim() || "أرسل صورة 📷";
       if (currentUser.role === 'admin') {
         await createNotification(
           targetUserId,
           "رسالة خاصة جديدة 💬",
-          `أرسل لك المدير رسالة خاصة: "${inputText.trim().substring(0, 40)}${inputText.trim().length > 40 ? '...' : ''}"`,
+          `أرسل لك المدير رسالة خاصة: "${notificationText.substring(0, 40)}${notificationText.length > 40 ? '...' : ''}"`,
           'private_message',
           currentUser.id
         );
@@ -967,7 +1061,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           await createNotification(
             admin.id,
             "رسالة خاصة جديدة 💬",
-            `أرسل لك العضو @${currentUser.username} رسالة خاصة: "${inputText.trim().substring(0, 40)}${inputText.trim().length > 40 ? '...' : ''}"`,
+            `أرسل لك العضو @${currentUserProfile?.username || currentUser.username} رسالة خاصة: "${notificationText.substring(0, 40)}${notificationText.length > 40 ? '...' : ''}"`,
             'private_message',
             currentUser.id
           );
@@ -975,6 +1069,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
       }
 
       setInputText('');
+      setImageFile(null);
+      setImagePreview('');
     } catch (err: any) {
       console.error('Error sending DM:', err);
     } finally {
@@ -1004,7 +1100,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
   // Delete own message (or admin deleting any message)
   const handleDeleteMessage = async (msgId: string) => {
-    if (!window.confirm('هل تريد بالتأكيد حذف هذه الرسالة؟')) return;
+    if (!window.confirm(t('confirm_delete_message'))) return;
     try {
       const msgRef = doc(db, 'messages', msgId);
       await deleteDoc(msgRef);
@@ -1017,12 +1113,12 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const copyGroupInviteCode = (code: string) => {
     const inviteLink = `${window.location.origin}${window.location.pathname}?invite=${code}`;
     navigator.clipboard.writeText(inviteLink).then(() => {
-      alert('تم نسخ رابط الدعوة! يمكنك مشاركته لينضم أصدقاؤك فوراً.');
+      alert(t('alert_invite_success'));
     });
   };
 
   return (
-    <div className="w-full h-screen bg-zinc-950 text-white font-sans flex flex-col md:flex-row-reverse" dir={t('dir')} id="chat-stage-layout">
+    <div className="w-full h-screen bg-zinc-950 text-white font-sans flex flex-col md:flex-row-reverse" dir={currentLang.dir} id="chat-stage-layout">
       
       {/* Sidebar (List of Groups & Private Chats) */}
       <div className="w-full md:w-80 bg-zinc-900 border-b md:border-b-0 md:border-l border-zinc-800 flex flex-col h-[40vh] md:h-screen shrink-0" id="chat-sidebar">
@@ -1031,7 +1127,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <button
             onClick={() => setShowProfileModal(true)}
             className="flex items-center gap-2.5 text-right hover:opacity-80 transition-opacity cursor-pointer group flex-1 min-w-0"
-            title="تعديل الملف الشخصي"
+            title={t('edit_profile')}
           >
             {currentUserProfile?.photoUrl ? (
               <img
@@ -1105,7 +1201,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               id="btn-user-notifications"
               onClick={() => setShowNotificationsDropdown(!showNotificationsDropdown)}
               className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center justify-center transition-colors cursor-pointer relative"
-              title="الإشعارات"
+              title={t('notifications')}
             >
               <Bell size={14} className={notifications.some(n => !n.isRead) ? "animate-bounce text-emerald-400" : ""} />
               {notifications.some(n => !n.isRead) && (
@@ -1120,7 +1216,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
               id="btn-user-logout"
               onClick={onLogout}
               className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-red-950/40 text-zinc-400 hover:text-red-400 flex items-center justify-center transition-colors cursor-pointer shrink-0"
-              title="تسجيل الخروج"
+              title={t('logout')}
             >
               <LogOut size={14} />
             </button>
@@ -1207,7 +1303,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             }`}
           >
             <Users size={14} />
-            الكروبات
+            {t('groups_tab')}
           </button>
 
           <button
@@ -1221,7 +1317,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             }`}
           >
             <UserCheck size={14} />
-            الأعضاء
+            {t('members_tab')}
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping inline-block shrink-0" />
           </button>
 
@@ -1237,7 +1333,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             }`}
           >
             <MessageSquare size={14} />
-            الدعم
+            {t('support_tab')}
             {unreadCount > 0 && (
               <span className="absolute -top-1 -left-1 bg-red-500 text-white text-[9px] font-bold h-4 min-w-4 px-1 rounded-full flex items-center justify-center animate-bounce shadow-md">
                 {unreadCount}
@@ -1285,6 +1381,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         onClick={() => {
                           setSelectedGroup(group);
                           setIsSelectedDmActive(false);
+                          setInputText('');
+                          setImageFile(null);
+                          setImagePreview('');
                         }}
                         className={`w-full p-2.5 rounded-xl text-right transition-all flex items-center gap-3 border ${
                           selectedGroup?.id === group.id
@@ -1359,6 +1458,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                                 setIsSelectedDmActive(true);
                                 setSelectedGroup(null);
                                 setActiveMode('dms');
+                                setInputText('');
+                                setImageFile(null);
+                                setImagePreview('');
                               }}
                               className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold transition-colors cursor-pointer"
                             >
@@ -1375,7 +1477,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
             /* Private DMs View */
             <div className="space-y-2">
               <span className="text-[10px] text-zinc-500 font-bold uppercase px-1 block mb-2">
-                {currentUser.role === 'admin' ? 'مراسلة الأعضاء' : 'الدعم والمدير'}
+                {currentUser.role === 'admin' ? t('messaging_members') : t('support_and_admin')}
               </span>
               {currentUser.role === 'admin' ? (
                 <div className="space-y-1.5" id="admin-dm-users-list">
@@ -1391,6 +1493,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                             setSelectedContact(user);
                             setIsSelectedDmActive(true);
                             setSelectedGroup(null);
+                            setInputText('');
+                            setImageFile(null);
+                            setImagePreview('');
                           }}
                           className={`w-full p-2.5 rounded-xl text-right transition-all flex items-center justify-between border ${
                             isSelectedDmActive && selectedContact?.id === user.id
@@ -1422,7 +1527,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                               </span>
                             )}
                             <span className={`text-[9px] font-bold ${online ? 'text-emerald-400' : 'text-zinc-500'}`}>
-                              {online ? 'متصل' : 'غير متصل'}
+                              {online ? t('online') : t('offline')}
                             </span>
                           </div>
                         </button>
@@ -1435,6 +1540,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   onClick={() => {
                     setIsSelectedDmActive(true);
                     setSelectedGroup(null);
+                    setInputText('');
+                    setImageFile(null);
+                    setImagePreview('');
                   }}
                   className={`w-full p-3 rounded-xl text-right transition-all flex items-center gap-3 border relative ${
                     isSelectedDmActive && !selectedGroup
@@ -1446,8 +1554,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     A
                   </div>
                   <div className="flex-1 min-w-0">
-                    <h4 className="font-bold text-xs text-white text-right">محادثة المالك (Admin)</h4>
-                    <p className="text-[10px] text-emerald-400 text-right mt-0.5">خط مراسلة آمن ومباشر</p>
+                    <h4 className="font-bold text-xs text-white text-right">{t('owner_chat')}</h4>
+                    <p className="text-[10px] text-emerald-400 text-right mt-0.5">{t('secure_messaging_line')}</p>
                   </div>
                   {unreadCount > 0 && (
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 bg-red-500 text-white text-[9px] font-bold h-4 min-w-4 px-1.5 rounded-full flex items-center justify-center animate-bounce shadow-md">
@@ -1620,7 +1728,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                               id={`btn-start-edit-${msg.id}`}
                               onClick={() => handleStartEdit(msg)}
                               className="text-zinc-600 hover:text-emerald-400 p-0.5"
-                              title="تعديل الرسالة"
+                              title={t('edit_message')}
                             >
                               <Edit2 size={10} />
                             </button>
@@ -1628,7 +1736,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                               id={`btn-delete-msg-${msg.id}`}
                               onClick={() => handleDeleteMessage(msg.id)}
                               className="text-zinc-600 hover:text-red-400 p-0.5"
-                              title="حذف الرسالة"
+                              title={t('delete_message')}
                             >
                               <Trash2 size={10} />
                             </button>
@@ -1641,7 +1749,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                             id={`btn-admin-delete-msg-${msg.id}`}
                             onClick={() => handleDeleteMessage(msg.id)}
                             className="text-zinc-600 hover:text-red-400 p-0.5"
-                            title="حذف الرسالة (صلاحية المدير)"
+                            title={t('delete_message') + ' (' + t('admin_badge') + ')'}
                           >
                             <Trash2 size={10} />
                           </button>
@@ -1766,7 +1874,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   id="btn-toggle-emoji-group"
                   onClick={() => setShowEmojiPicker(!showEmojiPicker)}
                   className={`w-11 h-11 bg-zinc-900 border border-zinc-800 rounded-xl flex items-center justify-center transition-colors shrink-0 cursor-pointer ${showEmojiPicker ? 'text-emerald-400 border-emerald-500/50' : 'text-zinc-400 hover:text-white hover:border-zinc-700'}`}
-                  title="إضافة رمز تعبيري"
+                  title={t('add_emoji')}
                 >
                   <Smile size={18} />
                 </button>
@@ -1774,7 +1882,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 <input
                   id="group-chat-text-input"
                   type="text"
-                  placeholder={imageFile ? "أضف تعليقاً على الصورة (اختياري)..." : "اكتب رسالتك للكروب هنا..."}
+                  placeholder={imageFile ? t('placeholder_comment_image') : t('placeholder_group_chat')}
                   value={inputText}
                   onChange={(e) => handleInputChange(e.target.value)}
                   className="flex-1 h-11 px-4 bg-zinc-900 border border-zinc-800 rounded-xl text-xs focus:outline-none focus:border-emerald-500 text-right"
@@ -1820,10 +1928,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           </h3>
                           <span className={`w-2 h-2 rounded-full ${isUserOnline(selectedContact) ? 'bg-emerald-500 shadow-sm shadow-emerald-500/50 animate-pulse' : 'bg-zinc-600'}`} />
                           <span className={`text-[9px] font-bold ${isUserOnline(selectedContact) ? 'text-emerald-400' : 'text-zinc-500'}`}>
-                            ({isUserOnline(selectedContact) ? 'متصل حالياً' : 'غير متصل'})
+                            ({isUserOnline(selectedContact) ? t('online') : t('offline')})
                           </span>
                         </div>
-                        <p className="text-[10px] text-emerald-400 mt-0.5">مراسلة خاصة مع العضو @{selectedContact.username}</p>
+                        <p className="text-[10px] text-emerald-400 mt-0.5">{t('private_chat_with_member')} @{selectedContact.username}</p>
                       </div>
                     </>
                   ) : (
@@ -1832,8 +1940,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         A
                       </div>
                       <div className="text-right">
-                        <h3 className="font-bold text-sm text-white">دردشة مالك المنصة (الأدمن)</h3>
-                        <p className="text-[10px] text-emerald-400">خط مراسلة آمن ومباشر مع الدعم الفني للمالك</p>
+                        <h3 className="font-bold text-sm text-white">{t('active_dms_with_admin')}</h3>
+                        <p className="text-[10px] text-emerald-400">{t('active_dms_with_admin_desc')}</p>
                       </div>
                     </>
                   )}
@@ -1845,8 +1953,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 {currentChatMessages.length === 0 ? (
                   <div className="my-auto text-center space-y-2 text-zinc-500 text-xs">
                     <Lock className="mx-auto text-zinc-600 animate-pulse" size={32} />
-                    <p>لا توجد رسائل خاصة بعد.</p>
-                    <p className="text-[10px]">الرسائل في هذا القسم سرية تماماً ومباشرة.</p>
+                    <p>{t('no_dms')}</p>
+                    <p className="text-[10px]">{t('no_dms_desc')}</p>
                   </div>
                 ) : (
                   currentChatMessages.map((msg) => {
@@ -1859,13 +1967,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         }`}
                       >
                         <div
-                          className={`p-3 rounded-2xl text-xs text-right leading-relaxed ${
+                          className={`p-3 rounded-2xl text-xs text-right leading-relaxed border flex flex-col gap-2 ${
                             isOwn
-                              ? 'bg-emerald-600 text-white rounded-br-none'
-                              : 'bg-zinc-800 text-zinc-100 rounded-bl-none'
+                              ? 'bg-emerald-600 text-white border-emerald-500/30 rounded-br-none'
+                              : 'bg-zinc-800 text-zinc-100 border-zinc-700/80 rounded-bl-none'
                           }`}
                         >
-                          {msg.text}
+                          {msg.photoUrl && (
+                            <div
+                              onClick={() => setZoomedImage(msg.photoUrl || null)}
+                              className="rounded-xl overflow-hidden max-w-xs border border-zinc-700 max-h-60 cursor-zoom-in group relative"
+                            >
+                              <img src={msg.photoUrl} alt="Private DM Upload" className="w-full h-full object-cover" />
+                              <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                                <span className="text-[10px] bg-black/60 px-2 py-1 rounded text-white font-medium">تكبير الصورة 🔍</span>
+                              </div>
+                            </div>
+                          )}
+                          {msg.text && <p className="whitespace-pre-wrap">{msg.text}</p>}
                         </div>
                         <div className="flex items-center gap-1.5 mt-1">
                           <span className="text-[8px] text-zinc-500">
@@ -1873,9 +1992,9 @@ export const ChatView: React.FC<ChatViewProps> = ({
                           </span>
                           {isOwn && (
                             msg.read ? (
-                              <CheckCheck size={12} className="text-sky-400" title="تم العرض" />
+                              <CheckCheck size={12} className="text-sky-400" title={t('seen_badge')} />
                             ) : (
-                              <Check size={12} className="text-zinc-500" title="تم الإرسال" />
+                              <Check size={12} className="text-zinc-500" title={t('sent_badge')} />
                             )
                           )}
                         </div>
@@ -1897,6 +2016,31 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     <span className="w-1 h-1 rounded-full bg-emerald-500 animate-bounce" style={{ animationDelay: '150ms' }} />
                     <span className="w-1 h-1 rounded-full bg-emerald-500 animate-bounce" style={{ animationDelay: '300ms' }} />
                   </div>
+                </div>
+              )}
+
+              {/* Image Preview bar if selected */}
+              {imagePreview && (
+                <div className="p-3 bg-zinc-950 border-t border-zinc-800 flex items-center justify-between" id="image-upload-preview-bar-dm">
+                  <div className="flex items-center gap-3">
+                    <div className="w-16 h-16 rounded-lg overflow-hidden border border-zinc-700">
+                      <img src={imagePreview} alt="Preview" className="w-full h-full object-cover" />
+                    </div>
+                    <div className="text-right">
+                      <span className="text-xs text-zinc-300 block">صورة جاهزة للإرسال</span>
+                      <span className="text-[10px] text-zinc-500">سيتم رفعها وتضمينها مع الرسالة الخاصة</span>
+                    </div>
+                  </div>
+                  <button
+                    id="btn-remove-image-preview-dm"
+                    onClick={() => {
+                      setImageFile(null);
+                      setImagePreview('');
+                    }}
+                    className="w-8 h-8 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-400 flex items-center justify-center cursor-pointer"
+                  >
+                    <X size={16} />
+                  </button>
                 </div>
               )}
 
@@ -1955,13 +2099,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
                 {/* Input bar */}
                 <form onSubmit={handleSendPrivateMessage} className="p-3 bg-zinc-950 border-t border-zinc-800 flex gap-2" id="dm-input-form-stage">
+                  {/* Photo Upload Attachment Button */}
+                  <label className="w-11 h-11 bg-zinc-900 border border-zinc-800 hover:border-emerald-500 hover:text-emerald-400 rounded-xl flex items-center justify-center text-zinc-400 transition-colors cursor-pointer shrink-0">
+                    <ImageIcon size={18} />
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleImageChange}
+                      className="hidden"
+                    />
+                  </label>
+
                   {/* Emoji Picker Toggle Button */}
                   <button
                     type="button"
                     id="btn-toggle-emoji-dm"
                     onClick={() => setShowEmojiPicker(!showEmojiPicker)}
                     className={`w-11 h-11 bg-zinc-900 border border-zinc-800 rounded-xl flex items-center justify-center transition-colors shrink-0 cursor-pointer ${showEmojiPicker ? 'text-emerald-400 border-emerald-500/50' : 'text-zinc-400 hover:text-white hover:border-zinc-700'}`}
-                    title="إضافة رمز تعبيري"
+                    title={t('add_emoji')}
                   >
                     <Smile size={18} />
                   </button>
@@ -1969,7 +2124,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <input
                     id="dm-chat-text-input"
                     type="text"
-                    placeholder={currentUser.role === 'admin' ? "اكتب رسالتك الخاصة للعضو هنا..." : "اكتب ردك المباشر للأدمن هنا..."}
+                    placeholder={imageFile ? t('placeholder_comment_image') : (currentUser.role === 'admin' ? t('placeholder_admin_dm_user') : t('placeholder_user_dm_admin'))}
                     value={inputText}
                     onChange={(e) => handleInputChange(e.target.value)}
                     className="flex-1 h-11 px-4 bg-zinc-900 border border-zinc-800 rounded-xl text-xs focus:outline-none focus:border-emerald-500 text-right"
@@ -1979,7 +2134,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   <button
                     id="btn-send-dm-msg"
                     type="submit"
-                    disabled={isSending || !inputText.trim()}
+                    disabled={isSending || (!inputText.trim() && !imageFile)}
                     className="w-11 h-11 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl flex items-center justify-center transition-colors cursor-pointer shrink-0 disabled:opacity-50"
                   >
                     <Send size={16} className="transform rotate-180" />
@@ -2087,16 +2242,18 @@ export const ChatView: React.FC<ChatViewProps> = ({
               initial={{ scale: 0.95 }}
               animate={{ scale: 1 }}
               exit={{ scale: 0.95 }}
-              className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-sm p-6 text-right"
-              dir="rtl"
+              className={`bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-sm p-6 ${currentLang.dir === 'rtl' ? 'text-right' : 'text-left'}`}
+              dir={currentLang.dir}
             >
               <div className="flex items-center justify-between pb-3 border-b border-zinc-800 mb-4">
-                <h3 className="font-bold text-sm text-white">تعديل الملف الشخصي</h3>
+                <h3 className="font-bold text-sm text-white">{t('edit_profile')}</h3>
                 <button
                   id="btn-close-profile-modal"
                   onClick={() => {
                     setShowProfileModal(false);
                     setProfileImageFile(null);
+                    setProfileFullName(currentUserProfile?.fullName || currentUser.fullName);
+                    setProfileUsername(currentUserProfile?.username || currentUser.username);
                     if (currentUserProfile?.photoUrl) {
                       setProfileImagePreview(currentUserProfile.photoUrl);
                     } else {
@@ -2142,29 +2299,42 @@ export const ChatView: React.FC<ChatViewProps> = ({
                       />
                     </label>
                   </div>
-                  <span className="text-[10px] text-zinc-500">انقر على الصورة لتغييرها</span>
+                  <span className="text-[10px] text-zinc-500">{t('choose_photo')}</span>
                 </div>
 
                 <div>
-                  <label htmlFor="profile-fullname-input" className="block text-zinc-400 text-xs mb-1.5 mr-1">الاسم الكامل الجديد</label>
+                  <label htmlFor="profile-fullname-input" className={`block text-zinc-400 text-xs mb-1.5 ${currentLang.dir === 'rtl' ? 'mr-1 text-right' : 'ml-1 text-left'}`}>{t('new_fullname')}</label>
                   <input
                     id="profile-fullname-input"
                     type="text"
                     value={profileFullName}
                     onChange={(e) => setProfileFullName(e.target.value)}
-                    className="w-full h-11 px-3 bg-zinc-950 border border-zinc-800 rounded-lg text-right text-sm text-white focus:outline-none focus:border-emerald-500"
+                    className={`w-full h-11 px-3 bg-zinc-950 border border-zinc-800 rounded-lg text-sm text-white focus:outline-none focus:border-emerald-500 ${currentLang.dir === 'rtl' ? 'text-right' : 'text-left'}`}
                     required
                   />
                 </div>
 
                 <div>
-                  <label htmlFor="profile-country-input" className="block text-zinc-400 text-xs mb-1.5 mr-1">الدولة العربية / الهوية الوطنية 🌍</label>
+                  <label htmlFor="profile-username-input" className={`block text-zinc-400 text-xs mb-1.5 ${currentLang.dir === 'rtl' ? 'mr-1 text-right' : 'ml-1 text-left'}`}>{t('username_label')}</label>
+                  <input
+                    id="profile-username-input"
+                    type="text"
+                    value={profileUsername}
+                    onChange={(e) => setProfileUsername(e.target.value)}
+                    className={`w-full h-11 px-3 bg-zinc-950 border border-zinc-800 rounded-lg text-sm text-white focus:outline-none focus:border-emerald-500 ${currentLang.dir === 'rtl' ? 'text-right' : 'text-left'}`}
+                    required
+                  />
+                  <p className="text-[10px] text-zinc-500 mt-1">{t('username_desc')}</p>
+                </div>
+
+                <div>
+                  <label htmlFor="profile-country-input" className={`block text-zinc-400 text-xs mb-1.5 ${currentLang.dir === 'rtl' ? 'mr-1 text-right' : 'ml-1 text-left'}`}>{t('change_flag')}</label>
                   <div className="relative">
                     <select
                       id="profile-country-input"
                       value={profileCountry}
                       onChange={(e) => setProfileCountry(e.target.value)}
-                      className="w-full h-11 px-3 bg-zinc-950 border border-zinc-800 rounded-lg text-right text-sm text-white focus:outline-none focus:border-emerald-500 appearance-none cursor-pointer font-medium"
+                      className={`w-full h-11 px-3 bg-zinc-950 border border-zinc-800 rounded-lg text-sm text-white focus:outline-none focus:border-emerald-500 appearance-none cursor-pointer font-medium ${currentLang.dir === 'rtl' ? 'text-right' : 'text-left'}`}
                       required
                     >
                       {ARAB_COUNTRIES.map((c) => (
@@ -2186,7 +2356,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     disabled={isUpdatingProfile}
                     className="flex-1 h-11 bg-emerald-600 hover:bg-emerald-500 text-white font-medium rounded-lg text-sm transition-colors cursor-pointer flex items-center justify-center disabled:opacity-50"
                   >
-                    {isUpdatingProfile ? 'جاري الحفظ...' : 'حفظ التغييرات'}
+                    {isUpdatingProfile ? t('loading') : t('submit_profile')}
                   </button>
                   <button
                     id="btn-cancel-profile"
@@ -2194,6 +2364,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     onClick={() => {
                       setShowProfileModal(false);
                       setProfileImageFile(null);
+                      setProfileFullName(currentUserProfile?.fullName || currentUser.fullName);
+                      setProfileUsername(currentUserProfile?.username || currentUser.username);
                       if (currentUserProfile?.photoUrl) {
                         setProfileImagePreview(currentUserProfile.photoUrl);
                       } else {
@@ -2202,7 +2374,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                     }}
                     className="px-4 h-11 bg-zinc-850 hover:bg-zinc-800 text-zinc-400 rounded-lg text-sm transition-colors cursor-pointer"
                   >
-                    إلغاء
+                    {t('cancel')}
                   </button>
                 </div>
               </form>

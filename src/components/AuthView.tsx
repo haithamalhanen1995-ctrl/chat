@@ -42,7 +42,9 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess, initialIsAdmi
   // Authentication Modes: 'login' (تسجيل الدخول) or 'register' (إنشاء حساب جديد)
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
 
-  const [siteName, setSiteName] = useState<string>('شات دجلة');
+  const [siteName, setSiteName] = useState<string>(() => {
+    return localStorage.getItem('chat_platform_site_name') || 'شات دجلة';
+  });
   const [showLangMenu, setShowLangMenu] = useState<boolean>(false);
 
   const t = (key: string) => {
@@ -53,7 +55,9 @@ export const AuthView: React.FC<AuthViewProps> = ({ onAuthSuccess, initialIsAdmi
     if (!isFirebaseReady) return;
     const unsub = onSnapshot(doc(db, 'settings', 'site_config'), (snap) => {
       if (snap.exists()) {
-        setSiteName(snap.data().siteName || 'شات دجلة');
+        const name = snap.data().siteName || 'شات دجلة';
+        setSiteName(name);
+        localStorage.setItem('chat_platform_site_name', name);
       }
     });
     return () => unsub();

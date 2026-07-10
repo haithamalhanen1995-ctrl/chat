@@ -103,6 +103,22 @@ const withTimeout = <T,>(promise: Promise<T>, timeoutMs: number = 5000): Promise
   ]);
 };
 
+// Helper to safely get epoch milliseconds for a Firestore Timestamp, Date, or string
+const getMessageTime = (createdAt: any): number => {
+  if (!createdAt) return 0;
+  if (typeof createdAt.toDate === 'function') {
+    return createdAt.toDate().getTime();
+  }
+  if (createdAt.seconds) {
+    return createdAt.seconds * 1000;
+  }
+  if (createdAt instanceof Date) {
+    return createdAt.getTime();
+  }
+  const parsed = new Date(createdAt).getTime();
+  return isNaN(parsed) ? 0 : parsed;
+};
+
 interface AdminPanelProps {
   adminUser: { id: string; fullName: string; username: string };
   onLogout: () => void;
@@ -145,7 +161,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [successMsg, setSuccessMsg] = useState<string>('');
 
   // Site Name Configurations
-  const [siteName, setSiteName] = useState<string>('شات دجلة');
+  const [siteName, setSiteName] = useState<string>(() => {
+    return localStorage.getItem('chat_platform_site_name') || 'شات دجلة';
+  });
   const [siteNameInput, setSiteNameInput] = useState<string>('');
   const [siteConfigLoading, setSiteConfigLoading] = useState<boolean>(false);
   const [siteConfigSuccess, setSiteConfigSuccess] = useState<string>('');
@@ -248,8 +266,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       // Sort messages by time
       Object.keys(tempChats).forEach((userId) => {
         tempChats[userId].sort((a, b) => {
-          const t1 = a.createdAt?.seconds || 0;
-          const t2 = b.createdAt?.seconds || 0;
+          const t1 = getMessageTime(a.createdAt);
+          const t2 = getMessageTime(b.createdAt);
           return t1 - t2;
         });
       });
@@ -334,6 +352,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         const name = snap.data().siteName || 'شات دجلة';
         setSiteName(name);
         setSiteNameInput(name);
+        localStorage.setItem('chat_platform_site_name', name);
       } else {
         setSiteName('شات دجلة');
         setSiteNameInput('شات دجلة');
@@ -831,8 +850,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const statsGroupsCount = groups.length;
   const statsMessagesCount = allMessages.length;
 
+  const currentLang = LANGUAGES.find((l) => l.code === language) || LANGUAGES[0];
+
   return (
-    <div className="w-full min-h-screen bg-zinc-950 text-white font-sans flex flex-col md:flex-row-reverse" dir={t('dir')} id="admin-panel-layout">
+    <div className="w-full min-h-screen bg-zinc-950 text-white font-sans flex flex-col md:flex-row-reverse" dir={currentLang.dir} id="admin-panel-layout">
       {/* Admin Sidebar Navigation */}
       <div className="w-full md:w-64 bg-zinc-900 border-b md:border-b-0 md:border-l border-zinc-800 p-5 flex flex-col justify-between" id="admin-sidebar">
         <div className="space-y-6">

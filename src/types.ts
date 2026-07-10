@@ -51,6 +51,7 @@ export interface PrivateMessage {
   senderId: string;
   receiverId: string;
   text: string;
+  photoUrl?: string;
   createdAt: any;
   read?: boolean;
 }

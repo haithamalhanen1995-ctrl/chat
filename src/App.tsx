@@ -50,7 +50,18 @@ interface UserSession {
 }
 
 export default function App() {
-  const [currentUser, setCurrentUser] = useState<UserSession | null>(null);
+  const [currentUser, setCurrentUser] = useState<UserSession | null>(() => {
+    const saved = localStorage.getItem('chat_platform_session');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        console.error('Failed to parse active user session:', e);
+        localStorage.removeItem('chat_platform_session');
+      }
+    }
+    return null;
+  });
   const [isFirebaseReady, setIsFirebaseReady] = useState<boolean>(false);
   const [language, setLanguage] = useState<LanguageCode>(() => {
     const saved = localStorage.getItem('chat_platform_language');
@@ -62,6 +73,20 @@ export default function App() {
   const [selectedGroupForChat, setSelectedGroupForChat] = useState<ChatGroup | null>(null);
   const [selectedContactForChat, setSelectedContactForChat] = useState<ChatUser | null>(null);
   const [toast, setToast] = useState<{ title: string; body: string } | null>(null);
+
+  // Auto-sync language to localStorage
+  useEffect(() => {
+    localStorage.setItem('chat_platform_language', language);
+  }, [language]);
+
+  // Auto-sync currentUser session to localStorage
+  useEffect(() => {
+    if (currentUser) {
+      localStorage.setItem('chat_platform_session', JSON.stringify(currentUser));
+    } else {
+      localStorage.removeItem('chat_platform_session');
+    }
+  }, [currentUser]);
 
   // Handle automatic Anonymous Firebase Authentication
   useEffect(() => {
@@ -179,19 +204,6 @@ export default function App() {
     setIsAdminPathActive(isAdmin);
     console.log('Is Admin path active:', isAdmin);
 
-    // Read session from localStorage
-    const savedSession = localStorage.getItem('chat_platform_session');
-    if (savedSession) {
-      try {
-        const user = JSON.parse(savedSession);
-        setCurrentUser(user);
-        console.log('Loaded active user session:', user.fullName);
-      } catch (err) {
-        console.error('Error loading session:', err);
-        localStorage.removeItem('chat_platform_session');
-      }
-    }
-
     // Hash change listener
     const handleHashChange = () => {
       const isHashAdmin = window.location.hash.includes('/admin');
@@ -221,6 +233,10 @@ export default function App() {
     url.searchParams.delete('invite');
     url.searchParams.delete('view');
     window.history.replaceState({}, '', url.pathname);
+  };
+
+  const handleUserUpdate = (updatedUser: UserSession) => {
+    setCurrentUser(updatedUser);
   };
 
   const currentLangInfo = LANGUAGES.find((l) => l.code === language) || LANGUAGES[0];
@@ -306,6 +322,7 @@ export default function App() {
                     language={language}
                     setLanguage={setLanguage}
                     isFirebaseReady={isFirebaseReady}
+                    onUserUpdate={handleUserUpdate}
                   />
                 </div>
               </div>
@@ -320,6 +337,7 @@ export default function App() {
                 language={language}
                 setLanguage={setLanguage}
                 isFirebaseReady={isFirebaseReady}
+                onUserUpdate={handleUserUpdate}
               />
             </div>
           )
